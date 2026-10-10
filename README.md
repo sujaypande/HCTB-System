@@ -68,12 +68,35 @@ duplicate data / already cancelled, 500 unexpected.
 `BookingService.createBooking` runs in one `@Transactional` method:
 
 1. Load user and event (404 if missing).
-2. Load the requested seats (404 if any is missing).
+2. Lock the requested seat rows with `SELECT ... FOR UPDATE` (`@Lock(PESSIMISTIC_WRITE)`), ordered by id
+   so overlapping requests always lock in the same order and cannot deadlock (404 if any is missing).
 3. Check every seat belongs to the event and is `AVAILABLE`; otherwise throw (400/409).
-4. Mark seats `BOOKED`, save the booking with the total price, commit.
+4. Mark seats `BOOKED`, save the booking with the total price, commit (locks released).
 
-If any step fails, the whole transaction rolls back, so booking several seats is all-or-nothing:
-seat statuses and the booking are saved together or not at all.
+If any step fails, the whole transaction rolls back, so booking several seats is all-or-nothing.
+A concurrent request for the same seat waits at step 2 until the first transaction commits, then sees
+`BOOKED` and gets 409. Cancel locks the booking row the same way, so two cancels cannot race.
+A lock that cannot be acquired in time also returns 409.
+
+## Concurrency testing
+
+| Test | Tool | Before the lock | With the lock |
+|---|---|---|---|
+| 20 threads book one seat | JUnit + Testcontainers (real MySQL) — `ConcurrentBookingTest` | **10 bookings** for one seat | **1 success, 19 × 409** |
+| 1,000 virtual users book one seat | k6 — `load-test/booking-load-test.js` | — | **1 success, 999 × 409, 0 errors** |
+
+1,000-user booking latency (k6, app + MySQL + k6 on one laptop, all users hitting the same seat):
+avg 4.1 s, p95 6.9 s. Requests for one seat are serialized by the lock and share 10 DB connections,
+so this is the worst case; bookings for different seats do not wait for each other.
+
+Run them:
+
+```bash
+mvn test                                    # needs Docker running, JDK 17+
+docker compose up -d --build
+docker run --rm -i --network highconcurrencyticketbookingsystem_default \
+  -e BASE_URL=http://app:8080 grafana/k6 run - < load-test/booking-load-test.js
+```
 
 ## Run with Docker Compose
 

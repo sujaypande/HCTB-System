@@ -5,6 +5,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -58,6 +59,13 @@ public class GlobalExceptionHandler {
             HandlerMethodValidationException.class})
     public ResponseEntity<ErrorResponse> handleMalformed(Exception ex, HttpServletRequest req) {
         return build(HttpStatus.BAD_REQUEST, "Malformed request", req, null);
+    }
+
+    /** A seat lock could not be acquired in time (MySQL lock wait timeout or deadlock victim). */
+    @ExceptionHandler(PessimisticLockingFailureException.class)
+    public ResponseEntity<ErrorResponse> handleLockFailure(PessimisticLockingFailureException ex,
+                                                           HttpServletRequest req) {
+        return build(HttpStatus.CONFLICT, "Seat is being booked by another user, please try again", req, null);
     }
 
     /** Safety net for unique constraints hit by a concurrent request after our own checks passed. */

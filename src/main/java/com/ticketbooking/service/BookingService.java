@@ -36,7 +36,11 @@ public class BookingService {
         this.eventService = eventService;
     }
 
-    /** Books all requested seats or none: any failure rolls back the whole transaction. */
+    /**
+     * Books all requested seats or none: any failure rolls back the whole transaction. The seat rows
+     * are locked with SELECT ... FOR UPDATE, so a second request for the same seat waits until this
+     * transaction commits and then sees BOOKED.
+     */
     @Transactional
     public BookingResponse createBooking(BookingRequest request) {
         User user = userService.findUser(request.userId());
@@ -47,7 +51,7 @@ public class BookingService {
             throw new BadRequestException("Duplicate seat ids in request");
         }
 
-        List<Seat> seats = seatRepository.findAllById(seatIds);
+        List<Seat> seats = seatRepository.findAllByIdForUpdate(seatIds);
         if (seats.size() != seatIds.size()) {
             Set<Long> found = seats.stream().map(Seat::getId).collect(Collectors.toSet());
             seatIds.removeAll(found);
@@ -72,7 +76,7 @@ public class BookingService {
 
     @Transactional
     public BookingResponse cancelBooking(Long bookingId) {
-        Booking booking = bookingRepository.findById(bookingId)
+        Booking booking = bookingRepository.findByIdForUpdate(bookingId)
                 .orElseThrow(() -> new ResourceNotFoundException("Booking", bookingId));
         if (booking.getStatus() == BookingStatus.CANCELLED) {
             throw new ConflictException("Booking " + bookingId + " is already cancelled");
