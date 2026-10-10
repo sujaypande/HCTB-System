@@ -1,0 +1,38 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: ticket-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpass}
+      MYSQL_DATABASE: ticketbooking
+      MYSQL_USER: ${DB_USERNAME:-ticket}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-ticket}
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      # 127.0.0.1 forces TCP, so the temporary server MySQL runs during first-time init
+      # (started with networking disabled) does not count as healthy.
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-rootpass}"]
+      start_period: 300s
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  app:
+    build: .
+    container_name: ticket-app
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      DB_URL: jdbc:mysql://mysql:3306/ticketbooking?serverTimezone=UTC
+      DB_USERNAME: ${DB_USERNAME:-ticket}
+      DB_PASSWORD: ${DB_PASSWORD:-ticket}
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    restart: unless-stopped
+
+volumes:
+  mysql-data:

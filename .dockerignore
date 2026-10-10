@@ -1,0 +1,6 @@
+target/
+_old-postgres-redis-kafka-version/
+.git/
+.idea/
+.vscode/
+*.md
