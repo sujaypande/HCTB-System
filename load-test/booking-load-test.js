@@ -19,6 +19,7 @@ const bookingOtherError = new Counter('booking_other_error');
 const bookingDuration = new Trend('booking_duration', true);   // booking requests only, not setup
 
 export const options = {
+    summaryTrendStats: ['avg', 'min', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
     setupTimeout: '5m',
     scenarios: {
         same_seat_rush: {

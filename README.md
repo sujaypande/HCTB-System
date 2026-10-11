@@ -1,53 +1,52 @@
-# Ticket Booking System
+# High-Concurrency Ticket Booking System
 
-RESTful ticket booking backend built with Java 17, Spring Boot 3, Spring Data JPA and MySQL,
-containerized with Docker Compose.
+REST backend for booking event seats, built with Java 17, Spring Boot 3, Spring Data JPA and MySQL.
+The main focus is making sure a seat can never be booked twice, even when many users try to book it
+at the same time.
 
 ## Architecture
 
 ```
-HTTP request
-   │
-Controller   (UserController, EventController, BookingController)  – routing + @Valid request validation
-   │
-Service      (UserService, EventService, BookingService)            – business rules, @Transactional
-   │
-Repository   (Spring Data JPA interfaces)                           – database access
-   │
+Controller   (UserController, EventController, BookingController)  - routing, @Valid request validation
+   |
+Service      (UserService, EventService, BookingService)            - business rules, @Transactional
+   |
+Repository   (Spring Data JPA)                                      - database access
+   |
 MySQL        (users, events, seats, bookings, booking_seats)
 ```
 
-Errors from any layer are turned into one JSON shape by `GlobalExceptionHandler` (`@RestControllerAdvice`).
+`GlobalExceptionHandler` (`@RestControllerAdvice`) turns every error into the same JSON format.
 
 ## Data model
 
-| Table           | Columns                                                                 |
-|-----------------|-------------------------------------------------------------------------|
-| `users`         | id, name, email (unique)                                                |
-| `events`        | id, name, venue, event_date, description                                |
-| `seats`         | id, event_id, seat_number, price, status (AVAILABLE/BOOKED) — unique (event_id, seat_number) |
-| `bookings`      | id, user_id, event_id, total_amount, status (CONFIRMED/CANCELLED), created_at |
-| `booking_seats` | booking_id, seat_id                                                     |
+| Table | Columns |
+|---|---|
+| `users` | id, name, email (unique) |
+| `events` | id, name, venue, event_date, description |
+| `seats` | id, event_id, seat_number, price, status (AVAILABLE / BOOKED), unique (event_id, seat_number) |
+| `bookings` | id, user_id, event_id, total_amount, status (CONFIRMED / CANCELLED), created_at |
+| `booking_seats` | booking_id, seat_id |
 
 ## API
 
-| Method | Endpoint                               | Purpose                                   |
-|--------|----------------------------------------|-------------------------------------------|
-| POST   | `/api/users`                           | Create user                               |
-| GET    | `/api/users/{id}`                      | Get user                                  |
-| GET    | `/api/users/{id}/bookings`             | Booking history of a user                 |
-| POST   | `/api/events`                          | Create event                              |
-| GET    | `/api/events`                          | List events                               |
-| GET    | `/api/events/{id}`                     | Get event                                 |
-| PUT    | `/api/events/{id}`                     | Update event                              |
-| DELETE | `/api/events/{id}`                     | Delete event (only if it has no bookings) |
-| POST   | `/api/events/{id}/seats`               | Add seats to an event                     |
-| GET    | `/api/events/{id}/seats?status=AVAILABLE` | Seat availability (status optional)    |
-| POST   | `/api/bookings`                        | Book seats                                |
-| GET    | `/api/bookings/{id}`                   | Get booking                               |
-| POST   | `/api/bookings/{id}/cancel`            | Cancel booking, seats become AVAILABLE    |
+| Method | Endpoint | Purpose |
+|---|---|---|
+| POST | `/api/users` | Create user |
+| GET | `/api/users/{id}` | Get user |
+| GET | `/api/users/{id}/bookings` | Booking history |
+| POST | `/api/events` | Create event |
+| GET | `/api/events` | List events |
+| GET | `/api/events/{id}` | Get event |
+| PUT | `/api/events/{id}` | Update event |
+| DELETE | `/api/events/{id}` | Delete event (only if it has no bookings) |
+| POST | `/api/events/{id}/seats` | Add seats to an event |
+| GET | `/api/events/{id}/seats?status=AVAILABLE` | Seat availability (status is optional) |
+| POST | `/api/bookings` | Book seats |
+| GET | `/api/bookings/{id}` | Get booking |
+| POST | `/api/bookings/{id}/cancel` | Cancel booking, seats become available again |
 
-Error response example:
+Error response:
 
 ```json
 {
@@ -60,61 +59,85 @@ Error response example:
 }
 ```
 
-Status codes: 201 created, 400 validation/malformed, 404 not found, 409 seat already booked /
-duplicate data / already cancelled, 500 unexpected.
+Status codes: 201 created, 400 invalid input, 404 not found, 409 seat already booked / duplicate data /
+already cancelled, 500 unexpected error.
 
-## Booking consistency
+## How double booking is prevented
 
-`BookingService.createBooking` runs in one `@Transactional` method:
+`BookingService.createBooking` runs in a single transaction:
 
-1. Load user and event (404 if missing).
-2. Lock the requested seat rows with `SELECT ... FOR UPDATE` (`@Lock(PESSIMISTIC_WRITE)`), ordered by id
-   so overlapping requests always lock in the same order and cannot deadlock (404 if any is missing).
-3. Check every seat belongs to the event and is `AVAILABLE`; otherwise throw (400/409).
-4. Mark seats `BOOKED`, save the booking with the total price, commit (locks released).
+1. Load the user and the event (404 if missing).
+2. Lock the requested seat rows with `SELECT ... FOR UPDATE` (`@Lock(PESSIMISTIC_WRITE)`). Rows are locked
+   in id order, so two requests for overlapping seats can't deadlock.
+3. Check that every seat belongs to the event and is `AVAILABLE`, otherwise return 400 / 409.
+4. Mark the seats `BOOKED`, save the booking, commit.
 
-If any step fails, the whole transaction rolls back, so booking several seats is all-or-nothing.
-A concurrent request for the same seat waits at step 2 until the first transaction commits, then sees
-`BOOKED` and gets 409. Cancel locks the booking row the same way, so two cancels cannot race.
-A lock that cannot be acquired in time also returns 409.
+A second request for the same seat waits at step 2 until the first one commits, then sees `BOOKED`
+and gets 409. Booking several seats is all or nothing. Cancelling locks the booking row the same way,
+so two cancels of the same booking can't interfere.
 
-## Concurrency testing
+Without the lock, `@Transactional` alone was not enough: in the concurrency test 20 parallel requests
+created 10 bookings for the same seat.
 
-| Test | Tool | Before the lock | With the lock |
-|---|---|---|---|
-| 20 threads book one seat | JUnit + Testcontainers (real MySQL) — `ConcurrentBookingTest` | **10 bookings** for one seat | **1 success, 19 × 409** |
-| 1,000 virtual users book one seat | k6 — `load-test/booking-load-test.js` | — | **1 success, 999 × 409, 0 errors** |
+## Testing
 
-1,000-user booking latency (k6, app + MySQL + k6 on one laptop, all users hitting the same seat):
-avg 4.1 s, p95 6.9 s. Requests for one seat are serialized by the lock and share 10 DB connections,
-so this is the worst case; bookings for different seats do not wait for each other.
-
-Run them:
+| Test | Result |
+|---|---|
+| `ConcurrentBookingTest`: 20 threads book one seat (JUnit + Testcontainers, real MySQL) | 10 bookings without the lock, 1 booking with it |
+| `load-test/booking-load-test.js`: 1,000 k6 users book one seat at the same time | 1 success, 999 x 409, 0 errors |
+| `load-test/throughput-test.js`: bookings at a fixed rate, each for a different seat | see AWS results below |
+| `load-test/scaling-test.js`: steady read traffic to trigger auto scaling | see AWS results below |
 
 ```bash
-mvn test                                    # needs Docker running, JDK 17+
-docker compose up -d --build
-docker run --rm -i --network highconcurrencyticketbookingsystem_default \
-  -e BASE_URL=http://app:8080 grafana/k6 run - < load-test/booking-load-test.js
+mvn test        # needs Docker running
+docker run --rm -i -e BASE_URL=http://<host> grafana/k6 run - < load-test/booking-load-test.js
+docker run --rm -i -e BASE_URL=http://<host> -e RATE=100 -e DURATION=30 grafana/k6 run - < load-test/throughput-test.js
 ```
 
-## Run with Docker Compose
+On my laptop the throughput was only about 30-36 bookings/s. Each MySQL commit waited ~300 ms for the
+disk to sync, and turning off the per-commit sync for a quick check brought a single booking from
+~300 ms down to ~16 ms, so the limit was the local disk, not the code.
+
+## AWS deployment
+
+```
+k6 (EC2, same region) -> Application Load Balancer :80 -> Auto Scaling Group (EC2 t3.micro, Docker) :8080 -> RDS MySQL 8.4
+```
+
+- App instances are created from a launch template. Their user data (`deploy/ec2-user-data.sh`) installs
+  Docker and runs the image from Docker Hub with the RDS connection details.
+- Security groups are chained: the ALB accepts HTTP from the internet, the app instances accept 8080
+  only from the ALB, and RDS accepts 3306 only from the app instances. RDS has no public access.
+- The target group health check uses `GET /api/events`.
+- The Auto Scaling Group uses a target tracking policy on average CPU (50%).
+
+Results with one app instance (t3.micro) and RDS db.t4g.micro, k6 running on an EC2 instance in the same region:
+
+| Test | Result |
+|---|---|
+| 1,000 users, one seat | 1 success, 999 x 409, 0 errors (p95 3.6 s, mostly waiting for the row lock) |
+| 100 bookings/s, different seats | 0 errors, median 8.4 ms, p95 11 ms |
+| 300 bookings/s, different seats | 0 errors, median 7.7 ms, p95 67 ms |
+| 400 bookings/s, different seats | 388/s achieved, instance starts to saturate |
+| 1,200 reads/s for ~10 min | CPU reached ~70%, the CloudWatch alarm fired and the group scaled from 1 to 2 instances; the new instance was healthy behind the ALB about 5 minutes later |
+
+## Run locally
 
 ```bash
 docker compose up -d --build
 curl http://localhost:8080/api/events
 ```
 
-If port 8080 or 3307 is taken on your machine: `APP_PORT=8081 docker compose up -d` (MySQL is exposed on host port 3307).
+If ports 8080 or 3307 are taken: `APP_PORT=8081 docker compose up -d`.
 
-## Run locally (without the app container)
+To run the app from the IDE / Maven against the MySQL container:
 
 ```bash
 docker compose up -d mysql
-mvn spring-boot:run          # connects to localhost:3307, override with DB_URL / DB_USERNAME / DB_PASSWORD
+mvn spring-boot:run      # uses localhost:3307, override with DB_URL / DB_USERNAME / DB_PASSWORD
 ```
 
-## Quick test
+Example requests:
 
 ```bash
 curl -X POST localhost:8080/api/users  -H 'Content-Type: application/json' -d '{"name":"Asha","email":"asha@example.com"}'
@@ -124,27 +147,3 @@ curl "localhost:8080/api/events/1/seats?status=AVAILABLE"
 curl -X POST localhost:8080/api/bookings -H 'Content-Type: application/json' -d '{"userId":1,"eventId":1,"seatIds":[1,2]}'
 curl -X POST localhost:8080/api/bookings/1/cancel
 ```
-
-## Deploy on AWS EC2
-
-1. Launch an EC2 instance (Amazon Linux 2023, t2.micro/t3.small). In the security group allow inbound
-   SSH (22) from your IP and TCP 8080 from anywhere. Do **not** open 3306/3307.
-2. SSH in and install Docker + Compose:
-   ```bash
-   sudo dnf install -y docker git
-   sudo systemctl enable --now docker
-   sudo usermod -aG docker ec2-user && newgrp docker
-   sudo mkdir -p /usr/local/lib/docker/cli-plugins
-   sudo curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
-        -o /usr/local/lib/docker/cli-plugins/docker-compose
-   sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
-   ```
-3. Copy the project (git clone or `scp`), set real passwords, and start it:
-   ```bash
-   export MYSQL_ROOT_PASSWORD=change-me DB_PASSWORD=change-me-too
-   docker compose up -d --build
-   ```
-4. Test: `curl http://<EC2_PUBLIC_IP>:8080/api/events`
-
-`restart: unless-stopped` and the named volume `mysql-data` keep the app running and the data intact
-across container and instance restarts.
